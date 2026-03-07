@@ -1,0 +1,4 @@
+nodriver
+requests
+faker
+colorama
