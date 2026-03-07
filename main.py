@@ -1,8 +1,10 @@
-"""
-╔══════════════════════════════════════════════════╗
-║   ChatGPT Auto Signup Bot — Learning Project     ║
-║   Untuk testing kemampuan browser automation     ║
-╚══════════════════════════════════════════════════╝
+""" 
+ChatGPT Auto Signup Bot
+Copyright (c) 2026 adityaypz (https://github.com/adityaypz)
+
+This software is protected under the MIT License.
+Unauthorized removal of this copyright notice is prohibited.
+See LICENSE file for full terms.
 """
 
 import asyncio
@@ -32,6 +34,9 @@ def print_banner():
 ║   {Fore.WHITE}ChatGPT Auto Signup Bot{Fore.CYAN}                       ║
 ║   {Fore.YELLOW}Learning Project — Browser Automation{Fore.CYAN}         ║
 ║   {Fore.GREEN}Engine: nodriver (undetected Chrome){Fore.CYAN}          ║
+║                                                  ║
+║   {Fore.WHITE}© 2026 adityaypz{Fore.CYAN}                              ║
+║   {Fore.WHITE}github.com/adityaypz/chatgpt-auto-signup{Fore.CYAN}     ║
 ║                                                  ║
 ╚══════════════════════════════════════════════════╝{Style.RESET_ALL}
 """

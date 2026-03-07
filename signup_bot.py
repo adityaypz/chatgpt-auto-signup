@@ -1,6 +1,9 @@
 """
 Signup Bot — Core automation untuk signup ChatGPT
 Menggunakan nodriver (undetected Chrome) untuk bypass Cloudflare
+
+Copyright (c) 2026 adityaypz (https://github.com/adityaypz)
+Unauthorized removal of this copyright notice is prohibited.
 """
 
 import asyncio

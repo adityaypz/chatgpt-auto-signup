@@ -1,6 +1,8 @@
 # ChatGPT Auto Signup Bot 🤖
 
 > **Learning Project** — Untuk belajar browser automation tingkat tinggi dengan Python + `nodriver` (undetected Chrome).
+>
+> **© 2026 [adityaypz](https://github.com/adityaypz)** — Licensed under [MIT](LICENSE)
 
 ## ⚠️ Disclaimer
 
