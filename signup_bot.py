@@ -15,7 +15,7 @@ import nodriver as uc
 from colorama import Fore, Style
 from faker import Faker
 import config
-from temp_email import TempEmail
+from custom_email import CustomDomainEmail
 from proxy_manager import ProxyManager
 from captcha_solver import CaptchaSolver
 
@@ -36,7 +36,7 @@ class SignupBot:
         self.use_proxy = use_proxy if use_proxy is not None else config.USE_PROXY
         self.browser = None
         self.page = None
-        self.temp_email = TempEmail()
+        self.temp_email = CustomDomainEmail()
         self.proxy_manager = ProxyManager() if self.use_proxy else None
         self.captcha_solver = CaptchaSolver() if config.CAPTCHA_ENABLED else None
         self.results = []
@@ -75,27 +75,103 @@ class SignupBot:
         }
 
     # ═══════════════════════════════════════════
-    # Browser Setup
+    # Browser Setup & Proxy Hacks
     # ═══════════════════════════════════════════
+    def _create_proxy_extension(self, proxy_host, proxy_port, proxy_username, proxy_password):
+        """Buat temporary Chrome Extension untuk inject Proxy Auth"""
+        import os
+        import tempfile
+        import shutil
+
+        ext_dir = os.path.join(tempfile.gettempdir(), "chatgpt_proxy_ext")
+        if os.path.exists(ext_dir):
+            shutil.rmtree(ext_dir)
+        os.makedirs(ext_dir)
+
+        manifest_json = """
+        {
+            "version": "1.0.0",
+            "manifest_version": 2,
+            "name": "Proxy Auth Extension",
+            "permissions": [
+                "proxy",
+                "tabs",
+                "unlimitedStorage",
+                "storage",
+                "<all_urls>",
+                "webRequest",
+                "webRequestBlocking"
+            ],
+            "background": {
+                "scripts": ["background.js"]
+            },
+            "minimum_chrome_version": "22.0.0"
+        }
+        """
+
+        background_js = f"""
+        var config = {{
+            mode: "fixed_servers",
+            rules: {{
+                singleProxy: {{
+                    scheme: "http",
+                    host: "{proxy_host}",
+                    port: parseInt({proxy_port})
+                }},
+                bypassList: ["localhost"]
+            }}
+        }};
+
+        chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
+
+        function callbackFn(details) {{
+            return {{
+                authCredentials: {{
+                    username: "{proxy_username}",
+                    password: "{proxy_password}"
+                }}
+            }};
+        }}
+
+        chrome.webRequest.onAuthRequired.addListener(
+            callbackFn,
+            {{urls: ["<all_urls>"]}},
+            ['blocking']
+        );
+        """
+
+        with open(os.path.join(ext_dir, "manifest.json"), "w") as f:
+            f.write(manifest_json)
+        with open(os.path.join(ext_dir, "background.js"), "w") as f:
+            f.write(background_js)
+
+        return ext_dir
+
     async def _setup_browser(self):
         """Launch browser dengan nodriver (undetected Chrome)"""
         self._print_step("Launching browser (nodriver/undetected)...")
 
-        browser_args = []
+        browser_args = [
+            # Spoof User-Agent untuk menghindari deteksi HeadlessChrome oleh Cloudflare
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ]
+        
         if self.use_proxy and self.proxy_manager:
             proxy = self.proxy_manager.get_next_proxy()
             if proxy:
-                # nodriver menerima args Chrome standar
-                server = proxy['server'].replace('http://', '').replace('https://', '')
-                browser_args.append(f"--proxy-server={server}")
-                self._print_success(f"Menggunakan proxy: {server}")
+                server_url = proxy['server'].replace('http://', '').replace('https://', '')
                 
-                # CATATAN: Chrome headless/nodriver native tidak mendukung username:password
-                # proxy credentials di command line secara aman. Jika proxy premium butuh auth,
-                # direkomendasikan whitelist IP VPS di dashboard provider proxy (IP Auth).
+                # Cek tipe proxy: Ada User/Pass atau tidak?
                 if proxy.get('username'):
-                    self._print_warning("Proxy memerlukan username/password.")
-                    self._print_warning("Pastikan Anda menggunakan 'IP Whitelist' di provider proxy Anda untuk nodriver.")
+                    self._print_success(f"Menggunakan proxy dengan Authentication: {server_url}")
+                    host, port = server_url.split(':')
+                    ext_path = self._create_proxy_extension(host, port, proxy['username'], proxy.get('password', ''))
+                    
+                    # Install ekstensi otentikasi proxy
+                    browser_args.append(f"--load-extension={ext_path}")
+                else:
+                    self._print_success(f"Menggunakan proxy IP Whitelist: {server_url}")
+                    browser_args.append(f"--proxy-server={server_url}")
 
         self.browser = await uc.start(
             headless=self.headless,
@@ -112,7 +188,12 @@ class SignupBot:
         """Buka halaman signup ChatGPT"""
         self._print_step("Navigating to ChatGPT signup...")
 
+        # Di mode headless, pastikan kita menggunakan tab utama
         self.page = await self.browser.get(config.SIGNUP_URL)
+        # Jika page adalah None, coba get main tab
+        if not self.page:
+            self.page = self.browser.main_tab
+            await self.page.get(config.SIGNUP_URL)
 
         # Tunggu halaman load penuh
         self._print_step("Menunggu halaman load...")
@@ -170,8 +251,30 @@ class SignupBot:
     # ═══════════════════════════════════════════
     async def _enter_email(self, email: str):
         """Input email address"""
-        self._print_step(f"Memasukkan email: {email}")
-        await self._random_delay(1.0, 2.0)
+        # Mengatasi OpenAI Login Modal terbaru 
+        # Klik "Continue with email" menggunakan JS Injection (lebih kebal React)
+        self._print_step("Mencari tombol 'Continue with email'...")
+        js_click_email = """
+        (() => {
+            let btns = Array.from(document.querySelectorAll('button'));
+            let emailBtn = btns.find(b => b.textContent.toLowerCase().includes('continue with email'));
+            if (emailBtn) {
+                emailBtn.click();
+                return true;
+            }
+            return false;
+        })();
+        """
+        for _ in range(15):
+            try:
+                clicked = await self.page.evaluate(js_click_email)
+                if clicked:
+                    self._print_success("Klik 'Continue with email' berhasil via JS!")
+                    await self.page.sleep(1)
+                    break
+            except Exception:
+                pass
+            await self.page.sleep(1)
 
         # Cari input email via CSS selector
         email_element = None
@@ -216,16 +319,25 @@ class SignupBot:
         # Klik Continue
         await self._click_continue()
 
-        # Tunggu halaman berubah
+        # Tunggu halaman merespons (bisa sukses ke password, atau gagal dengan error text)
+        self._print_step("Memeriksa status email...")
+        
+        # Polling untuk cek error
+        for _ in range(5):
+            await self.page.sleep(1)
+            
+            # Cek form error text atau redirect
+            if await self._check_auth_error():
+                domain = email.split('@')[1] if '@' in email else 'unknown'
+                raise AuthErrorException(
+                    f"Email domain '{domain}' diblock oleh OpenAI"
+                )
+                
+            # Jika URL berubah (mungkin langsung redirect ke halaman lain)
+            if self.page.url != url_before and "login" not in self.page.url:
+                break
+                
         self._print_step("Menunggu halaman password...")
-        await self.page.sleep(5)
-
-        # Cek auth error
-        if await self._check_auth_error():
-            domain = email.split('@')[1] if '@' in email else 'unknown'
-            raise AuthErrorException(
-                f"Email domain '{domain}' diblock oleh OpenAI"
-            )
 
     # ═══════════════════════════════════════════
     # Password Entry
@@ -456,7 +568,8 @@ class SignupBot:
             // Cari tombol yang teksnya mengandung kata kunci submit/finish
             let submitBtn = btns.find(b => {
                 let text = b.textContent.toLowerCase();
-                return text.includes('finish') || text.includes('agree') || text.includes('continue') || text.includes('submit');
+                let isSSO = text.includes('google') || text.includes('apple') || text.includes('microsoft');
+                return (text.includes('finish') || text.includes('agree') || text.includes('continue') || text.includes('submit') || text.includes('next')) && !isSSO;
             });
             if (submitBtn) {
                 // Hapus atribut disabled jika form react masih melocknya
@@ -502,12 +615,13 @@ class SignupBot:
         (() => {
             let btns = Array.from(document.querySelectorAll('button'));
             
-            // Cari tombol utama, hindari tombol SSO (Google/Apple/Microsoft)
+            // Cari tombol utama, hindari tombol SSO (Google/Apple/Microsoft) dan Phone
             let submitBtn = btns.find(b => {
                 let text = b.textContent.toLowerCase();
                 let isSSO = text.includes('google') || text.includes('apple') || text.includes('microsoft');
+                let isPhone = text.includes('phone');
                 let isSubmit = text.includes('continue') || text.includes('next') || text.includes('submit') || text.includes('verify');
-                return isSubmit && !isSSO;
+                return isSubmit && !isSSO && !isPhone;
             });
             
             if (submitBtn) {
@@ -562,11 +676,31 @@ class SignupBot:
             pass
 
     async def _check_auth_error(self) -> bool:
-        """Cek apakah halaman redirect ke auth error"""
+        """Cek apakah halaman redirect ke auth error atau ada pesan error form"""
         current_url = str(self.page.url or "")
         if "/api/auth/error" in current_url or "/auth/error" in current_url:
-            self._print_warning(f"⚠️ Auth error detected: {current_url}")
+            self._print_warning(f"⚠️ Auth error detected via URL: {current_url}")
             return True
+            
+        # Cek teks error yang muncul di halaman
+        error_keywords = [
+            "email you provided is not supported",
+            "is not supported",
+            "too many requests",
+            "please try again later",
+            "signup is currently unavailable"
+        ]
+        
+        try:
+            body_text = await self.page.evaluate("document.body.innerText.toLowerCase()")
+            if body_text:
+                for err in error_keywords:
+                    if err in body_text:
+                        self._print_warning(f"⚠️ Auth error detected via text: '{err}'")
+                        return True
+        except Exception:
+            pass
+            
         return False
 
     async def _handle_phone_verification(self) -> bool:
@@ -651,36 +785,93 @@ class SignupBot:
                         raise Exception(f"Semua email domain diblock: {config.BLOCKED_EMAIL_DOMAINS}")
                     continue
 
-            # 5. Enter password
-            await self._enter_password(password)
-            await self._random_delay(1, 2)
-
-            # 6. Wait for verification code
-            self._print_step("Menunggu email verifikasi...")
-            code = self.temp_email.wait_for_verification_code()
-
-            if code:
-                await self._enter_verification_code(code)
-                await self._random_delay(1, 2)
-
-                phone_required = await self._handle_phone_verification()
-
+            # 5. Dynamic Auth Flow Handling
+            # Could be Password OR Email Code OR direct to Phone Verification
+            self._print_step("Mendeteksi urutan form selanjutnya (Password/Code/Phone)...")
+            next_step = None
+            
+            for _ in range(15):  # 15 seconds max wait
                 try:
-                    await self._fill_personal_info()
+                    # Check if Password field exists
+                    pwd = await self.page.select("input[type='password'], input[name='password']", timeout=0.1)
+                    if pwd:
+                        next_step = "password"
+                        break
                 except Exception:
                     pass
+                
+                try:
+                    # Check if Verification code field exists
+                    code_el = await self.page.select("input[name='code'], input[inputmode='numeric']", timeout=0.1)
+                    if code_el:
+                        next_step = "email_code"
+                        break
+                except Exception:
+                    pass
+                
+                try:
+                    # Check if Phone verification exists
+                    phone_el = await self.page.select("input[type='tel']", timeout=0.1)
+                    if phone_el:
+                        next_step = "phone"
+                        break
+                except Exception:
+                    pass
+                
+                await self.page.sleep(1)
 
-                await self.page.sleep(2)
-                await self._dismiss_dialogs()
+            phone_required = False
 
-                result["status"] = "success"
-                result["phone_required"] = phone_required
-                self._print_success(f"🎉 SIGNUP BERHASIL!")
-                self._print_success(f"   Email: {email_addr}")
-                self._print_success(f"   Password: {password}")
+            if next_step == "password":
+                await self._enter_password(password)
+                self._print_step("Menunggu email verifikasi...")
+                code = self.temp_email.wait_for_verification_code()
+                if code:
+                    await self._enter_verification_code(code)
+                else:
+                    raise Exception("Verification code not received")
+
+            elif next_step == "email_code":
+                self._print_step("OpenAI meminta kode email lebih dulu!")
+                self._print_step("Menunggu email verifikasi...")
+                code = self.temp_email.wait_for_verification_code()
+                if code:
+                    await self._enter_verification_code(code)
+                    await self._random_delay(1, 2)
+                    
+                    # Cek apakah setelah kode OTP OpenAI minta password?
+                    try:
+                        pwd = await self.page.select("input[type='password'], input[name='password']", timeout=5)
+                        if pwd:
+                            self._print_step("Ah, sekarang diminta set password!")
+                            await self._enter_password(password)
+                    except Exception:
+                        pass # Kadang passwordless atau password sudah tidak diminta
+                else:
+                    raise Exception("Verification code not received")
+                
+            elif next_step == "phone":
+                self._print_warning("Langsung diarahkan ke Phone Verification (tanpa set password)!")
+                phone_required = await self._handle_phone_verification()
             else:
-                result["error"] = "Verification code not received"
-                self._print_error("Gagal: verification code tidak diterima")
+                self._print_warning("Review halaman: tidak dapat mendeteksi input Password, Email Code, atau Phone. Mencoba lanjut...")
+
+            # 6. Final Steps (Personal Info, Dismiss Dialogs, Success)
+            phone_required = await self._handle_phone_verification()
+
+            try:
+                await self._fill_personal_info()
+            except Exception:
+                pass
+
+            await self.page.sleep(2)
+            await self._dismiss_dialogs()
+
+            result["status"] = "success"
+            result["phone_required"] = phone_required
+            self._print_success(f"🎉 SIGNUP BERHASIL!")
+            self._print_success(f"   Email: {email_addr}")
+            self._print_success(f"   Password: {password}")
 
         except Exception as e:
             result["error"] = str(e)
